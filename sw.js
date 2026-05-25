@@ -1,5 +1,5 @@
-/* SM VideoAnalyst — Service Worker v1 */
-const CACHE = 'sm-videoanalyst-v1';
+/* SM VideoAnalyst — Service Worker v2 */
+const CACHE = 'sm-videoanalyst-v2';
 const ASSETS = [
   './',
   './index.html',
