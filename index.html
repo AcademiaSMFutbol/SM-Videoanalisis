@@ -245,6 +245,20 @@ label.dz-btn:hover,label.dz-btn:active{border-color:rgba(0,230,118,.4);color:var
 .zm-btn.save{background:rgba(0,230,118,.1);border-color:rgba(0,230,118,.4);color:var(--gneon);}
 .zm-btn.save:hover,.zm-btn.save:active{background:rgba(0,230,118,.18);}
 
+/* INLINE TEXT INPUT */
+#inline-text{
+  position:absolute;display:none;
+  background:rgba(0,0,0,.85);border:1px solid rgba(0,230,118,.6);border-radius:3px;
+  color:var(--gneon);font-family:var(--mono);font-size:14px;
+  padding:5px 9px;outline:none;z-index:50;min-width:130px;pointer-events:all;
+}
+
+/* FOCUS & SELECT tool buttons */
+.tool-btn.focus-btn.active{background:rgba(66,165,245,.08);border-color:rgba(66,165,245,.5);}
+.tool-btn.focus-btn.active .tn{color:var(--blue);}
+.tool-btn.select-btn.active{background:rgba(255,202,40,.08);border-color:rgba(255,202,40,.5);}
+.tool-btn.select-btn.active .tn{color:var(--yellow);}
+
 /* ═══════════════════════════════════════════
    MOBILE  ≤768px — Tab layout + bottom nav
 ═══════════════════════════════════════════ */
@@ -391,6 +405,7 @@ label.dz-btn:hover,label.dz-btn:active{border-color:rgba(0,230,118,.4);color:var
         </div>
         <video id="video" playsinline></video>
         <canvas id="canvas"></canvas>
+        <input type="text" id="inline-text" autocomplete="off" placeholder="Escribe aquí…">
         <div id="zoom-sel-overlay"></div>
         <div id="pause-badge">⏸ PAUSADO — dibujando</div>
       </div>
@@ -446,6 +461,12 @@ label.dz-btn:hover,label.dz-btn:active{border-color:rgba(0,230,118,.4);color:var
           </div>
           <div class="tool-btn" data-tool="clear" onclick="clearCanvas()">
             <span class="ti">🗑</span><span class="tn">Limpiar</span>
+          </div>
+          <div class="tool-btn focus-btn" data-tool="focus" onclick="setTool('focus')">
+            <span class="ti">🔦</span><span class="tn">Foco</span>
+          </div>
+          <div class="tool-btn select-btn" data-tool="select" onclick="setTool('select')">
+            <span class="ti">↖</span><span class="tn">Seleccionar</span>
           </div>
           <div class="tool-btn zoom-btn" data-tool="zoom" onclick="setTool('zoom')">
             <span class="ti">🔍</span><span class="tn" style="color:var(--blue)">Zoom — seleccionar área</span>
@@ -567,6 +588,7 @@ const S = {
   expCancelled: false,
   expChunks: [],
   expRecorder: null,
+  sel: null,   // {shape, frameKey, dragOffX, dragOffY, dragging, resizing, initSize, initY}
 };
 
 const DRAW_DUR = 30;   // 30 × 0.1s = 3 segundos visibles por anotación
@@ -699,10 +721,18 @@ function fk(){ return Math.round(video.currentTime * 10); }
 function renderFrame(){
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   const k = fk();
+  const focusShapes = [];
   for(const key in S.annotations){
     for(const s of S.annotations[key]){
-      if(k >= s.fromKey && k <= s.toKey) drawShape(ctx, s);
+      if(k >= s.fromKey && k <= s.toKey){
+        if(s.type === 'focus') focusShapes.push(s);
+        else drawShape(ctx, s);
+      }
     }
+  }
+  if(focusShapes.length) drawFocusShapes(ctx, focusShapes, canvas.width, canvas.height);
+  if(S.sel && S.sel.shape && k >= S.sel.shape.fromKey && k <= S.sel.shape.toKey){
+    drawSelectionHandles(ctx, S.sel.shape);
   }
 }
 
@@ -726,6 +756,40 @@ canvas.addEventListener('mouseleave', onUp);
 canvas.addEventListener('touchstart', e=>{ e.preventDefault(); onDown(e); }, {passive:false});
 canvas.addEventListener('touchmove',  e=>{ e.preventDefault(); onMove(e); }, {passive:false});
 canvas.addEventListener('touchend',   e=>{ e.preventDefault(); onUp(e);   }, {passive:false});
+canvas.addEventListener('dblclick', e=>{
+  if(S.tool==='select' && S.sel && S.sel.shape.type==='text'){
+    const s=S.sel.shape;
+    showInlineText(s.x, s.y, s.text, txt=>{ if(txt!==null) s.text=txt; renderFrame(); });
+  }
+});
+
+// ── INLINE TEXT ────────────────────────────
+const inlineText = document.getElementById('inline-text');
+let _inlineTextCb = null;
+
+function showInlineText(canvasX, canvasY, initVal, cb){
+  _inlineTextCb = cb;
+  inlineText.value = initVal || '';
+  inlineText.style.left = (canvas.offsetLeft + canvasX) + 'px';
+  inlineText.style.top  = (canvas.offsetTop  + canvasY - 30) + 'px';
+  inlineText.style.display = 'block';
+  requestAnimationFrame(()=>{ inlineText.focus(); inlineText.select(); });
+}
+
+function _confirmInlineText(){
+  if(inlineText.style.display === 'none') return;
+  const val = inlineText.value.trim();
+  inlineText.style.display = 'none';
+  const cb = _inlineTextCb; _inlineTextCb = null;
+  if(cb) cb(val || null);
+}
+
+inlineText.addEventListener('keydown', e=>{
+  e.stopPropagation();
+  if(e.key==='Enter') _confirmInlineText();
+  if(e.key==='Escape'){ inlineText.style.display='none'; _inlineTextCb=null; }
+});
+inlineText.addEventListener('blur', _confirmInlineText);
 
 function onDown(e){
   if(!S.videoLoaded) return;
@@ -735,6 +799,45 @@ function onDown(e){
     const p = cpos(e);
     S.zoom.sel=true; S.zoom.x=p.x; S.zoom.y=p.y; S.zoom.w=0; S.zoom.h=0;
     showZoomSel(p.x, p.y, 0, 0);
+    return;
+  }
+
+  // SELECT TOOL — hit test, no drawing
+  if(S.tool === 'select'){
+    const p = cpos(e);
+    const k = fk();
+    // Check resize handle for selected text shape
+    if(S.sel && S.sel.shape.type === 'text'){
+      const bb = getBBox(S.sel.shape);
+      const hx=bb.x+bb.w+4, hy=bb.y+bb.h+4;
+      if(dist(p.x,p.y,hx,hy) < 10){
+        S.sel.resizing=true; S.sel.initSize=S.sel.shape.size; S.sel.initY=p.y;
+        if(!video.paused){ video.pause(); S.paused=true; showPauseBadge(true); }
+        return;
+      }
+    }
+    // Hit-test all visible shapes (last match wins → topmost drawn)
+    let found=null, foundKey=null;
+    for(const key in S.annotations){
+      for(const s of S.annotations[key]){
+        if(k>=s.fromKey && k<=s.toKey && hitTest(s,p.x,p.y)){
+          found=s; foundKey=key;
+        }
+      }
+    }
+    S.sel = found
+      ? {shape:found, frameKey:foundKey, dragOffX:p.x, dragOffY:p.y, dragging:false, resizing:false}
+      : null;
+    renderFrame();
+    return;
+  }
+
+  // FOCUS TOOL — single click, no drag
+  if(S.tool === 'focus'){
+    if(!video.paused){ video.pause(); S.paused=true; showPauseBadge(true); }
+    const p = cpos(e);
+    saveShape({type:'focus', cx:p.x, cy:p.y, baseRadius:Math.round(canvas.width*0.18), color:S.color});
+    renderFrame();
     return;
   }
 
@@ -753,9 +856,10 @@ function onDown(e){
 
   if(S.tool === 'text'){
     S.drawing = false;
-    const txt = prompt('Texto:');
-    if(txt) saveShape({type:'text', x:p.x, y:p.y, text:txt, color:S.color, size:S.size+10});
-    renderFrame();
+    showInlineText(p.x, p.y, '', txt => {
+      if(txt) saveShape({type:'text', x:p.x, y:p.y, text:txt, color:S.color, size:S.size+10});
+      renderFrame();
+    });
   }
 }
 
@@ -765,6 +869,26 @@ function onMove(e){
     const p = cpos(e);
     S.zoom.w = p.x - S.zoom.x; S.zoom.h = p.y - S.zoom.y;
     showZoomSel(S.zoom.x, S.zoom.y, S.zoom.w, S.zoom.h);
+    return;
+  }
+
+  // Select: drag shape or resize text
+  if(S.tool === 'select' && S.sel){
+    const p = cpos(e);
+    if(S.sel.resizing){
+      const dy = p.y - S.sel.initY;
+      S.sel.shape.size = Math.max(10, S.sel.initSize - dy * 0.5);
+      renderFrame(); return;
+    }
+    if(S.sel.dragging || dist(p.x,p.y,S.sel.dragOffX,S.sel.dragOffY) > 3){
+      if(!S.sel.dragging){
+        if(!video.paused){ video.pause(); S.paused=true; showPauseBadge(true); }
+        S.sel.dragging = true;
+      }
+      moveShape(S.sel.shape, p.x-S.sel.dragOffX, p.y-S.sel.dragOffY);
+      S.sel.dragOffX=p.x; S.sel.dragOffY=p.y;
+      renderFrame();
+    }
     return;
   }
 
@@ -783,6 +907,12 @@ function onMove(e){
 }
 
 function onUp(e){
+  // Select: end drag or resize
+  if(S.tool === 'select'){
+    if(S.sel){ S.sel.dragging=false; S.sel.resizing=false; }
+    return;
+  }
+
   // Zoom confirm
   if(S.tool === 'zoom' && S.zoom.sel){
     S.zoom.sel = false;
@@ -896,6 +1026,105 @@ function drawText(c, s){
   c.fillText(s.text, s.x, s.y); c.shadowBlur=0;
 }
 
+// ── FOCUS (SPOTLIGHT) ──────────────────────
+let _focusOff = null;
+function drawFocusShapes(targetCtx, shapes, cw, ch){
+  if(!_focusOff) _focusOff = document.createElement('canvas');
+  if(_focusOff.width  !== cw) _focusOff.width  = cw;
+  if(_focusOff.height !== ch) _focusOff.height = ch;
+  const oc = _focusOff.getContext('2d');
+  oc.clearRect(0, 0, cw, ch);
+  // Dark overlay
+  oc.fillStyle = 'rgba(0,0,0,0.62)';
+  oc.fillRect(0, 0, cw, ch);
+  // Cut a transparent cone for each focus shape
+  oc.globalCompositeOperation = 'destination-out';
+  shapes.forEach(s => {
+    oc.beginPath();
+    oc.moveTo(s.cx, 0);
+    oc.lineTo(s.cx - s.baseRadius, s.cy);
+    oc.lineTo(s.cx + s.baseRadius, s.cy);
+    oc.closePath();
+    oc.fill();
+  });
+  oc.globalCompositeOperation = 'source-over';
+  // Decorative edges and dot per shape
+  shapes.forEach(s => {
+    oc.strokeStyle = 'rgba(255,255,255,0.25)';
+    oc.lineWidth = 1.5; oc.setLineDash([5, 4]);
+    oc.beginPath();
+    oc.moveTo(s.cx, 0); oc.lineTo(s.cx - s.baseRadius, s.cy);
+    oc.moveTo(s.cx, 0); oc.lineTo(s.cx + s.baseRadius, s.cy);
+    oc.stroke(); oc.setLineDash([]);
+    oc.beginPath(); oc.arc(s.cx, s.cy, 6, 0, Math.PI * 2);
+    oc.fillStyle = 'rgba(255,255,255,0.7)'; oc.fill();
+  });
+  targetCtx.drawImage(_focusOff, 0, 0);
+}
+
+// ── SELECT ─────────────────────────────────
+function hitTest(s, px, py, r=12){
+  switch(s.type){
+    case 'arrow': case 'line': return nearSeg(px,py,s.x1,s.y1,s.x2,s.y2,r);
+    case 'pen':   return s.path.some(pt=>dist(px,py,pt.x,pt.y)<r);
+    case 'circle': case 'rect':{
+      const cx=(s.x1+s.x2)/2, cy=(s.y1+s.y2)/2;
+      return dist(px,py,cx,cy)<Math.max(Math.abs(s.x2-s.x1),Math.abs(s.y2-s.y1))/2+r;
+    }
+    case 'text':{
+      const fs=s.size||16;
+      return px>s.x-r && px<s.x+(s.text||'').length*fs*.6+r && py>s.y-fs-r && py<s.y+r;
+    }
+    case 'focus': return dist(px,py,s.cx,s.cy)<r*2;
+    default: return false;
+  }
+}
+
+function getBBox(s){
+  switch(s.type){
+    case 'arrow': case 'line':
+      return {x:Math.min(s.x1,s.x2),y:Math.min(s.y1,s.y2),w:Math.abs(s.x2-s.x1),h:Math.abs(s.y2-s.y1)};
+    case 'pen':{
+      const xs=s.path.map(p=>p.x), ys=s.path.map(p=>p.y);
+      const x=Math.min(...xs), y=Math.min(...ys);
+      return {x,y,w:Math.max(...xs)-x,h:Math.max(...ys)-y};
+    }
+    case 'circle': case 'rect':
+      return {x:Math.min(s.x1,s.x2),y:Math.min(s.y1,s.y2),w:Math.abs(s.x2-s.x1),h:Math.abs(s.y2-s.y1)};
+    case 'text':{
+      const fs=s.size||16;
+      return {x:s.x,y:s.y-fs,w:(s.text||'').length*fs*.6,h:fs};
+    }
+    case 'focus':
+      return {x:s.cx-s.baseRadius,y:0,w:s.baseRadius*2,h:s.cy};
+    default: return {x:0,y:0,w:0,h:0};
+  }
+}
+
+function moveShape(s, dx, dy){
+  switch(s.type){
+    case 'arrow': case 'line': case 'circle': case 'rect':
+      s.x1+=dx; s.y1+=dy; s.x2+=dx; s.y2+=dy; break;
+    case 'pen': s.path=s.path.map(p=>({x:p.x+dx,y:p.y+dy})); break;
+    case 'text': s.x+=dx; s.y+=dy; break;
+    case 'focus': s.cx+=dx; s.cy+=dy; break;
+  }
+}
+
+function drawSelectionHandles(c, s){
+  const bb=getBBox(s);
+  c.save();
+  c.strokeStyle='rgba(255,255,255,0.9)'; c.lineWidth=1.5; c.setLineDash([4,3]);
+  c.strokeRect(bb.x-4, bb.y-4, bb.w+8, bb.h+8);
+  c.setLineDash([]);
+  if(s.type==='text'){
+    const hx=bb.x+bb.w+4, hy=bb.y+bb.h+4;
+    c.fillStyle='#fff'; c.fillRect(hx-5,hy-5,10,10);
+    c.strokeStyle='#555'; c.lineWidth=1; c.strokeRect(hx-5,hy-5,10,10);
+  }
+  c.restore();
+}
+
 // ── ERASER ─────────────────────────────────
 function eraseAt(x, y){
   const k=fk(), r=22;
@@ -926,10 +1155,13 @@ function clearCanvas(){ S.annotations={}; renderFrame(); toast('Canvas limpiado'
 // ── TOOLS ──────────────────────────────────
 function setTool(t){
   S.tool = t;
+  S.sel = null;
   document.querySelectorAll('.tool-btn').forEach(b=>b.classList.toggle('active',b.dataset.tool===t));
-  canvas.style.cursor = t==='eraser'?'cell':'crosshair';
-  const names={arrow:'Flecha',line:'Línea',pen:'Trazo',circle:'Zona',rect:'Rectángulo',text:'Texto',eraser:'Borrador',zoom:'Zoom'};
+  canvas.style.cursor = t==='eraser'?'cell':t==='select'?'default':'crosshair';
+  const names={arrow:'Flecha',line:'Línea',pen:'Trazo',circle:'Zona',rect:'Rectángulo',
+    text:'Texto',eraser:'Borrador',zoom:'Zoom',focus:'Foco',select:'Seleccionar'};
   document.getElementById('sb-tool').textContent = names[t]||t;
+  renderFrame();
 }
 function setColor(el){
   S.color=el.dataset.c;
@@ -1134,13 +1366,16 @@ function startExport(){
       cctx.drawImage(video,0,0,cw,ch);
       // draw shapes visible at this frame
       const k=Math.round(video.currentTime*10);
+      const expFocus=[];
       for(const key in S.annotations){
         for(const s of S.annotations[key]){
           if(k>=s.fromKey&&k<=s.toKey){
-            cctx.save(); applyStyle(cctx,s); drawShape(cctx,s); cctx.restore();
+            if(s.type==='focus'){ expFocus.push(s); }
+            else { cctx.save(); applyStyle(cctx,s); drawShape(cctx,s); cctx.restore(); }
           }
         }
       }
+      if(expFocus.length) drawFocusShapes(cctx, expFocus, cw, ch);
       video.currentTime+=1/FPS;
       expTimer=setTimeout(frame,8);
     }
@@ -1295,6 +1530,7 @@ document.addEventListener('keydown',e=>{
     'l':()=>setTool('line'),      'c':()=>setTool('circle'),
     'r':()=>setTool('rect'),      't':()=>setTool('text'),
     'e':()=>setTool('eraser'),    'z':()=>setTool('zoom'),
+    'k':()=>setTool('focus'),     's':()=>setTool('select'),
   };
   if(map[e.key]){ e.preventDefault(); map[e.key](); }
 });
