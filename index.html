@@ -475,8 +475,8 @@ label.dz-btn:hover,label.dz-btn:active{border-color:rgba(0,230,118,.4);color:var
 
         <div class="slbl">Color</div>
         <div class="color-row">
-          <div class="cdot sel" style="background:#00e676" data-c="#00e676" onclick="setColor(this)"></div>
-          <div class="cdot" style="background:#ffca28" data-c="#ffca28" onclick="setColor(this)"></div>
+          <div class="cdot" style="background:#00e676" data-c="#00e676" onclick="setColor(this)"></div>
+          <div class="cdot sel" style="background:#ffca28" data-c="#ffca28" onclick="setColor(this)"></div>
           <div class="cdot" style="background:#42a5f5" data-c="#42a5f5" onclick="setColor(this)"></div>
           <div class="cdot" style="background:#ef5350" data-c="#ef5350" onclick="setColor(this)"></div>
           <div class="cdot" style="background:#ffffff" data-c="#ffffff" onclick="setColor(this)"></div>
@@ -574,8 +574,9 @@ label.dz-btn:hover,label.dz-btn:active{border-color:rgba(0,230,118,.4);color:var
 
 // ── STATE ──────────────────────────────────
 const S = {
-  tool: 'arrow', color: '#00e676', size: 2,
+  tool: 'arrow', color: '#ffca28', size: 2,
   drawing: false, startX:0, startY:0, path:[],
+  inProgress: null, // shape being drawn (live preview via rafLoop)
   // annotations[frameKey] = [shape, ...]
   // shape.fromKey / shape.toKey = visible range (0.1s buckets)
   annotations: {},
@@ -730,10 +731,27 @@ function renderFrame(){
       }
     }
   }
+  // Live preview of shape being drawn
+  if(S.inProgress){
+    const tmp = buildTempShape(S.inProgress);
+    if(tmp){ ctx.save(); applyStyle(ctx, tmp); drawShape(ctx, tmp); ctx.restore(); }
+  }
   if(focusShapes.length) drawFocusShapes(ctx, focusShapes, canvas.width, canvas.height);
   if(S.sel && S.sel.shape && k >= S.sel.shape.fromKey && k <= S.sel.shape.toKey){
     drawSelectionHandles(ctx, S.sel.shape);
   }
+}
+
+function buildTempShape(ip){
+  const b = {color:ip.color, size:ip.size};
+  switch(ip.tool){
+    case 'pen':    return {...b, type:'pen',    path:ip.path};
+    case 'arrow':  return {...b, type:'arrow',  x1:ip.startX, y1:ip.startY, x2:ip.endX, y2:ip.endY};
+    case 'line':   return {...b, type:'line',   x1:ip.startX, y1:ip.startY, x2:ip.endX, y2:ip.endY};
+    case 'circle': return {...b, type:'circle', x1:ip.startX, y1:ip.startY, x2:ip.endX, y2:ip.endY};
+    case 'rect':   return {...b, type:'rect',   x1:ip.startX, y1:ip.startY, x2:ip.endX, y2:ip.endY};
+  }
+  return null;
 }
 
 // rAF keeps canvas live during playback
@@ -806,14 +824,26 @@ function onDown(e){
   if(S.tool === 'select'){
     const p = cpos(e);
     const k = fk();
-    // Check resize handle for selected text shape
-    if(S.sel && S.sel.shape.type === 'text'){
-      const bb = getBBox(S.sel.shape);
-      const hx=bb.x+bb.w+4, hy=bb.y+bb.h+4;
-      if(dist(p.x,p.y,hx,hy) < 10){
-        S.sel.resizing=true; S.sel.initSize=S.sel.shape.size; S.sel.initY=p.y;
-        if(!video.paused){ video.pause(); S.paused=true; showPauseBadge(true); }
-        return;
+    if(S.sel){
+      const ss = S.sel.shape;
+      // Check resize handle for text
+      if(ss.type === 'text'){
+        const bb = getBBox(ss);
+        const hx=bb.x+bb.w+4, hy=bb.y+bb.h+4;
+        if(dist(p.x,p.y,hx,hy) < 10){
+          S.sel.resizing=true; S.sel.initSize=ss.size; S.sel.initY=p.y;
+          if(!video.paused){ video.pause(); S.paused=true; showPauseBadge(true); }
+          return;
+        }
+      }
+      // Check draggable nodes
+      for(const n of getNodes(ss)){
+        if(dist(p.x,p.y,n.x,n.y) < 12){
+          S.sel.nodeId = n.id;
+          if(!video.paused){ video.pause(); S.paused=true; showPauseBadge(true); }
+          canvas.style.cursor = 'grabbing';
+          return;
+        }
       }
     }
     // Hit-test all visible shapes (last match wins → topmost drawn)
@@ -826,7 +856,7 @@ function onDown(e){
       }
     }
     S.sel = found
-      ? {shape:found, frameKey:foundKey, dragOffX:p.x, dragOffY:p.y, dragging:false, resizing:false}
+      ? {shape:found, frameKey:foundKey, dragOffX:p.x, dragOffY:p.y, dragging:false, resizing:false, nodeId:null}
       : null;
     renderFrame();
     return;
@@ -872,18 +902,22 @@ function onMove(e){
     return;
   }
 
-  // Select: drag shape or resize text
+  // Select: node drag / resize / shape drag
   if(S.tool === 'select' && S.sel){
     const p = cpos(e);
     if(S.sel.resizing){
-      const dy = p.y - S.sel.initY;
-      S.sel.shape.size = Math.max(10, S.sel.initSize - dy * 0.5);
+      S.sel.shape.size = Math.max(10, S.sel.initSize - (p.y - S.sel.initY) * 0.5);
+      renderFrame(); return;
+    }
+    if(S.sel.nodeId){
+      applyNode(S.sel.shape, S.sel.nodeId, p.x, p.y);
       renderFrame(); return;
     }
     if(S.sel.dragging || dist(p.x,p.y,S.sel.dragOffX,S.sel.dragOffY) > 3){
       if(!S.sel.dragging){
         if(!video.paused){ video.pause(); S.paused=true; showPauseBadge(true); }
         S.sel.dragging = true;
+        canvas.style.cursor = 'move';
       }
       moveShape(S.sel.shape, p.x-S.sel.dragOffX, p.y-S.sel.dragOffY);
       S.sel.dragOffX=p.x; S.sel.dragOffY=p.y;
@@ -898,18 +932,15 @@ function onMove(e){
   if(S.tool === 'eraser'){ eraseAt(p.x, p.y); return; }
 
   S.path.push({x:p.x, y:p.y});
-  renderFrame();
-  // Preview
-  ctx.save();
-  applyStyle(ctx);
-  previewShape(ctx, p);
-  ctx.restore();
+  // Update inProgress for live preview (rafLoop renders it)
+  S.inProgress = {tool:S.tool, startX:S.startX, startY:S.startY, endX:p.x, endY:p.y, path:S.path, color:S.color, size:S.size};
 }
 
 function onUp(e){
-  // Select: end drag or resize
+  // Select: end any active operation
   if(S.tool === 'select'){
-    if(S.sel){ S.sel.dragging=false; S.sel.resizing=false; }
+    if(S.sel){ S.sel.dragging=false; S.sel.resizing=false; S.sel.nodeId=null; }
+    canvas.style.cursor = 'default';
     return;
   }
 
@@ -933,9 +964,18 @@ function onUp(e){
         : {x:S.startX, y:S.startY})
     : cpos(e);
 
+  S.inProgress = null;
   if(S.tool==='eraser') return;
   const shape = buildShape(p);
-  if(shape) saveShape(shape);
+  if(shape){
+    saveShape(shape);
+    // Auto-select the new shape for immediate fine-tuning
+    S.tool = 'select';
+    S.sel = {shape, frameKey:String(shape.fromKey), dragOffX:0, dragOffY:0, dragging:false, resizing:false, nodeId:null};
+    document.querySelectorAll('.tool-btn').forEach(b=>b.classList.toggle('active', b.dataset.tool==='select'));
+    canvas.style.cursor = 'default';
+    document.getElementById('sb-tool').textContent = 'Seleccionar';
+  }
   renderFrame();
 }
 
@@ -1111,12 +1151,48 @@ function moveShape(s, dx, dy){
   }
 }
 
+function getNodes(s){
+  switch(s.type){
+    case 'arrow': case 'line':
+      return [{x:s.x1,y:s.y1,id:'p1'},{x:s.x2,y:s.y2,id:'p2'}];
+    case 'circle': case 'rect':
+      return [
+        {x:s.x1,y:s.y1,id:'tl'},{x:s.x2,y:s.y1,id:'tr'},
+        {x:s.x2,y:s.y2,id:'br'},{x:s.x1,y:s.y2,id:'bl'},
+      ];
+    default: return [];
+  }
+}
+
+function applyNode(s, id, nx, ny){
+  switch(s.type){
+    case 'arrow': case 'line':
+      if(id==='p1'){s.x1=nx;s.y1=ny;} else {s.x2=nx;s.y2=ny;}
+      break;
+    case 'circle': case 'rect':
+      if(id==='tl'){s.x1=nx;s.y1=ny;}
+      else if(id==='tr'){s.x2=nx;s.y1=ny;}
+      else if(id==='br'){s.x2=nx;s.y2=ny;}
+      else if(id==='bl'){s.x1=nx;s.y2=ny;}
+      break;
+  }
+}
+
 function drawSelectionHandles(c, s){
-  const bb=getBBox(s);
+  const bb = getBBox(s);
+  const nodes = getNodes(s);
   c.save();
-  c.strokeStyle='rgba(255,255,255,0.9)'; c.lineWidth=1.5; c.setLineDash([4,3]);
-  c.strokeRect(bb.x-4, bb.y-4, bb.w+8, bb.h+8);
+  // Bounding box
+  c.strokeStyle='rgba(255,255,255,0.55)'; c.lineWidth=1; c.setLineDash([4,3]);
+  c.strokeRect(bb.x-5, bb.y-5, bb.w+10, bb.h+10);
   c.setLineDash([]);
+  // Draggable nodes
+  nodes.forEach(n=>{
+    c.beginPath(); c.arc(n.x, n.y, 7, 0, Math.PI*2);
+    c.fillStyle='rgba(255,255,255,0.95)'; c.fill();
+    c.strokeStyle='rgba(0,0,0,0.65)'; c.lineWidth=1.5; c.stroke();
+  });
+  // Text resize handle
   if(s.type==='text'){
     const hx=bb.x+bb.w+4, hy=bb.y+bb.h+4;
     c.fillStyle='#fff'; c.fillRect(hx-5,hy-5,10,10);
@@ -1156,6 +1232,7 @@ function clearCanvas(){ S.annotations={}; renderFrame(); toast('Canvas limpiado'
 function setTool(t){
   S.tool = t;
   S.sel = null;
+  S.inProgress = null;
   document.querySelectorAll('.tool-btn').forEach(b=>b.classList.toggle('active',b.dataset.tool===t));
   canvas.style.cursor = t==='eraser'?'cell':t==='select'?'default':'crosshair';
   const names={arrow:'Flecha',line:'Línea',pen:'Trazo',circle:'Zona',rect:'Rectángulo',
