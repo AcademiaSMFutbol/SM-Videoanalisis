@@ -258,6 +258,9 @@ label.dz-btn:hover,label.dz-btn:active{border-color:rgba(0,230,118,.4);color:var
 .tool-btn.focus-btn.active .tn{color:var(--blue);}
 .tool-btn.select-btn.active{background:rgba(255,202,40,.08);border-color:rgba(255,202,40,.5);}
 .tool-btn.select-btn.active .tn{color:var(--yellow);}
+.tool-btn.player-btn{grid-column:span 2;min-height:44px;border-color:rgba(255,202,40,.25);}
+.tool-btn.player-btn.active{background:rgba(255,202,40,.10);border-color:rgba(255,202,40,.55);}
+.tool-btn.player-btn .tn,.tool-btn.player-btn.active .tn{color:var(--yellow);}
 
 /* TOPBAR OVERFLOW MENU */
 #tb-menu{
@@ -495,6 +498,15 @@ label.dz-btn:hover,label.dz-btn:active{border-color:rgba(0,230,118,.4);color:var
           <div class="tool-btn" data-tool="clear" onclick="clearCanvas()">
             <span class="ti">🗑</span><span class="tn">Limpiar</span>
           </div>
+          <div class="tool-btn" data-tool="curve" onclick="setTool('curve')">
+            <span class="ti">↩</span><span class="tn">Flecha curva</span>
+          </div>
+          <div class="tool-btn" data-tool="dashed" onclick="setTool('dashed')">
+            <span class="ti">⤳</span><span class="tn">Trayectoria</span>
+          </div>
+          <div class="tool-btn player-btn" data-tool="player" onclick="setTool('player')">
+            <span class="ti">◎</span><span class="tn">Jugador</span>
+          </div>
           <div class="tool-btn focus-btn" data-tool="focus" onclick="setTool('focus')">
             <span class="ti">🔦</span><span class="tn">Foco</span>
           </div>
@@ -623,6 +635,7 @@ const S = {
   expChunks: [],
   expRecorder: null,
   sel: null,   // {shape, frameKey, dragOffX, dragOffY, dragging, resizing, initSize, initY}
+  history: [], historyIdx: -1,
 };
 
 const DRAW_DUR = 30;   // 30 × 0.1s = 3 segundos visibles por anotación
@@ -756,10 +769,12 @@ function renderFrame(){
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   const k = fk();
   const focusShapes = [];
+  const playerShapes = [];
   for(const key in S.annotations){
     for(const s of S.annotations[key]){
       if(k >= s.fromKey && k <= s.toKey){
         if(s.type === 'focus') focusShapes.push(s);
+        else if(s.type === 'player') playerShapes.push(s);
         else drawShape(ctx, s);
       }
     }
@@ -769,6 +784,7 @@ function renderFrame(){
     const tmp = buildTempShape(S.inProgress);
     if(tmp){ ctx.save(); applyStyle(ctx, tmp); drawShape(ctx, tmp); ctx.restore(); }
   }
+  playerShapes.forEach(s => drawPlayer(ctx, s, k));
   if(focusShapes.length) drawFocusShapes(ctx, focusShapes, canvas.width, canvas.height);
   if(S.sel && S.sel.shape && k >= S.sel.shape.fromKey && k <= S.sel.shape.toKey){
     drawSelectionHandles(ctx, S.sel.shape);
@@ -783,6 +799,8 @@ function buildTempShape(ip){
     case 'line':   return {...b, type:'line',   x1:ip.startX, y1:ip.startY, x2:ip.endX, y2:ip.endY};
     case 'circle': return {...b, type:'circle', x1:ip.startX, y1:ip.startY, x2:ip.endX, y2:ip.endY};
     case 'rect':   return {...b, type:'rect',   x1:ip.startX, y1:ip.startY, x2:ip.endX, y2:ip.endY};
+    case 'curve':{ const {cpx,cpy}=calcCurveCP(ip.startX,ip.startY,ip.endX,ip.endY); return {...b,type:'curve',x1:ip.startX,y1:ip.startY,x2:ip.endX,y2:ip.endY,cpx,cpy}; }
+    case 'dashed': return {...b, type:'dashed', x1:ip.startX, y1:ip.startY, x2:ip.endX, y2:ip.endY};
   }
   return null;
 }
@@ -888,8 +906,13 @@ function onDown(e){
         }
       }
     }
+    let dragOffX=p.x, dragOffY=p.y;
+    if(found && found.type==='player'){
+      const pos=interpolatePlayerPos(found,fk())||{cx:p.x,cy:p.y};
+      dragOffX=p.x-pos.cx; dragOffY=p.y-pos.cy;
+    }
     S.sel = found
-      ? {shape:found, frameKey:foundKey, dragOffX:p.x, dragOffY:p.y, dragging:false, resizing:false, nodeId:null}
+      ? {shape:found, frameKey:foundKey, dragOffX, dragOffY, dragging:false, resizing:false, nodeId:null}
       : null;
     renderFrame();
     return;
@@ -900,6 +923,27 @@ function onDown(e){
     if(!video.paused){ video.pause(); S.paused=true; showPauseBadge(true); }
     const p = cpos(e);
     saveShape({type:'focus', cx:p.x, cy:p.y, baseRadius:Math.round(canvas.width*0.18), color:S.color});
+    renderFrame();
+    return;
+  }
+
+  // PLAYER TOOL — single click places player tracking circle
+  if(S.tool === 'player'){
+    if(!video.paused){video.pause();S.paused=true;showPauseBadge(true);}
+    const p=cpos(e);
+    const k=fk();
+    const rad=Math.round(Math.min(canvas.width,canvas.height)*0.07);
+    const shape={type:'player',color:S.color,radius:rad,
+      fromKey:k, toKey:S.videoLoaded?Math.floor(video.duration*10):k+9999,
+      keyframes:[{fk:k,cx:p.x,cy:p.y}]};
+    if(!S.annotations[k])S.annotations[k]=[];
+    S.annotations[k].push(shape);
+    pushHistory();
+    S.tool='select';
+    S.sel={shape,frameKey:String(k),dragOffX:0,dragOffY:0,dragging:false,resizing:false,nodeId:null};
+    document.querySelectorAll('.tool-btn').forEach(b=>b.classList.toggle('active',b.dataset.tool==='select'));
+    canvas.style.cursor='default';
+    document.getElementById('sb-tool').textContent='Seleccionar';
     renderFrame();
     return;
   }
@@ -946,11 +990,16 @@ function onMove(e){
       applyNode(S.sel.shape, S.sel.nodeId, p.x, p.y);
       renderFrame(); return;
     }
-    if(S.sel.dragging || dist(p.x,p.y,S.sel.dragOffX,S.sel.dragOffY) > 3){
+    const isPlayer=S.sel.shape.type==='player';
+    if(S.sel.dragging || (!isPlayer && dist(p.x,p.y,S.sel.dragOffX,S.sel.dragOffY) > 3)){
       if(!S.sel.dragging){
         if(!video.paused){ video.pause(); S.paused=true; showPauseBadge(true); }
         S.sel.dragging = true;
         canvas.style.cursor = 'move';
+      }
+      if(isPlayer){
+        addPlayerKeyframe(S.sel.shape,fk(),p.x-S.sel.dragOffX,p.y-S.sel.dragOffY);
+        renderFrame(); return;
       }
       moveShape(S.sel.shape, p.x-S.sel.dragOffX, p.y-S.sel.dragOffY);
       S.sel.dragOffX=p.x; S.sel.dragOffY=p.y;
@@ -972,6 +1021,7 @@ function onMove(e){
 function onUp(e){
   // Select: end any active operation
   if(S.tool === 'select'){
+    if(S.sel && (S.sel.dragging || S.sel.nodeId || S.sel.resizing)) pushHistory();
     if(S.sel){ S.sel.dragging=false; S.sel.resizing=false; S.sel.nodeId=null; }
     canvas.style.cursor = 'default';
     return;
@@ -998,10 +1048,11 @@ function onUp(e){
     : cpos(e);
 
   S.inProgress = null;
-  if(S.tool==='eraser') return;
+  if(S.tool==='eraser'){ pushHistory(); return; }
   const shape = buildShape(p);
   if(shape){
     saveShape(shape);
+    pushHistory();
     // Auto-select the new shape for immediate fine-tuning
     S.tool = 'select';
     S.sel = {shape, frameKey:String(shape.fromKey), dragOffX:0, dragOffY:0, dragging:false, resizing:false, nodeId:null};
@@ -1021,6 +1072,8 @@ function buildShape(p){
     case 'line':   return {...b, type:'line',   x1:S.startX, y1:S.startY, x2:p.x, y2:p.y};
     case 'circle': return {...b, type:'circle', x1:S.startX, y1:S.startY, x2:p.x, y2:p.y};
     case 'rect':   return {...b, type:'rect',   x1:S.startX, y1:S.startY, x2:p.x, y2:p.y};
+    case 'curve':{ const {cpx,cpy}=calcCurveCP(S.startX,S.startY,p.x,p.y); return {...b,type:'curve',x1:S.startX,y1:S.startY,x2:p.x,y2:p.y,cpx,cpy}; }
+    case 'dashed': return {...b, type:'dashed', x1:S.startX, y1:S.startY, x2:p.x, y2:p.y};
   }
   return null;
 }
@@ -1059,6 +1112,8 @@ function drawShape(c, s){
     case 'circle': drawEllipse(c, s.x1, s.y1, s.x2, s.y2); break;
     case 'rect':   drawRect(c, s.x1, s.y1, s.x2, s.y2); break;
     case 'text':   drawText(c, s); break;
+    case 'curve':  drawCurve(c, s); break;
+    case 'dashed': drawDashed(c, s); break;
   }
   c.restore();
 }
@@ -1099,6 +1154,38 @@ function drawText(c, s){
   c.fillText(s.text, s.x, s.y); c.shadowBlur=0;
 }
 
+function calcCurveCP(x1,y1,x2,y2){
+  const mx=(x1+x2)/2, my=(y1+y2)/2, dx=x2-x1, dy=y2-y1;
+  return { cpx: mx - dy*0.35, cpy: my + dx*0.35 };
+}
+function drawCurve(c, s){
+  c.beginPath(); c.moveTo(s.x1,s.y1);
+  c.quadraticCurveTo(s.cpx,s.cpy,s.x2,s.y2); c.stroke();
+  const t=0.97;
+  const tx=2*(1-t)*(s.cpx-s.x1)+2*t*(s.x2-s.cpx);
+  const ty=2*(1-t)*(s.cpy-s.y1)+2*t*(s.y2-s.cpy);
+  const a=Math.atan2(ty,tx), hw=Math.min(18,Math.hypot(s.x2-s.x1,s.y2-s.y1)*.35);
+  c.beginPath();
+  c.moveTo(s.x2,s.y2);
+  c.lineTo(s.x2-hw*Math.cos(a-.4),s.y2-hw*Math.sin(a-.4));
+  c.lineTo(s.x2-hw*Math.cos(a+.4),s.y2-hw*Math.sin(a+.4));
+  c.closePath(); c.fill();
+}
+function drawDashed(c, s){
+  const sz=Math.max(1,s.size);
+  c.setLineDash([sz*4+4, sz*3+2]);
+  c.beginPath();c.moveTo(s.x1,s.y1);c.lineTo(s.x2,s.y2);c.stroke();
+  c.setLineDash([]);
+  const dx=s.x2-s.x1,dy=s.y2-s.y1,len=Math.hypot(dx,dy);
+  if(len<8) return;
+  const a=Math.atan2(dy,dx),hw=Math.min(13,len*.28);
+  c.beginPath();
+  c.moveTo(s.x2,s.y2);
+  c.lineTo(s.x2-hw*Math.cos(a-.35),s.y2-hw*Math.sin(a-.35));
+  c.lineTo(s.x2-hw*Math.cos(a+.35),s.y2-hw*Math.sin(a+.35));
+  c.closePath();c.fill();
+}
+
 // ── FOCUS (SPOTLIGHT) ──────────────────────
 let _focusOff = null;
 function drawFocusShapes(targetCtx, shapes, cw, ch){
@@ -1135,6 +1222,55 @@ function drawFocusShapes(targetCtx, shapes, cw, ch){
   targetCtx.drawImage(_focusOff, 0, 0);
 }
 
+// ── PLAYER ─────────────────────────────────
+function interpolatePlayerPos(s, k){
+  const kfs=s.keyframes;
+  if(!kfs||!kfs.length) return null;
+  if(kfs.length===1) return kfs[0];
+  if(k<=kfs[0].fk) return kfs[0];
+  if(k>=kfs[kfs.length-1].fk) return kfs[kfs.length-1];
+  for(let i=0;i<kfs.length-1;i++){
+    if(k>=kfs[i].fk && k<=kfs[i+1].fk){
+      const t=(k-kfs[i].fk)/(kfs[i+1].fk-kfs[i].fk);
+      return {cx:kfs[i].cx+t*(kfs[i+1].cx-kfs[i].cx), cy:kfs[i].cy+t*(kfs[i+1].cy-kfs[i].cy)};
+    }
+  }
+  return kfs[kfs.length-1];
+}
+function addPlayerKeyframe(s, k, cx, cy){
+  const ex=s.keyframes.find(kf=>kf.fk===k);
+  if(ex){ex.cx=cx;ex.cy=cy;}
+  else{s.keyframes.push({fk:k,cx,cy});s.keyframes.sort((a,b)=>a.fk-b.fk);}
+  if(k>s.toKey) s.toKey=k+300;
+}
+function drawPlayer(c, s, k){
+  const pos=interpolatePlayerPos(s,k);
+  if(!pos) return;
+  const rad=s.radius||38;
+  const pulse=Math.sin(Date.now()/380)*0.10+1;
+  c.save();
+  if(s.keyframes.length>1){
+    c.globalAlpha=0.35; c.strokeStyle=s.color; c.lineWidth=1.5; c.setLineDash([5,5]);
+    c.beginPath(); c.moveTo(s.keyframes[0].cx,s.keyframes[0].cy);
+    s.keyframes.slice(1).forEach(kf=>c.lineTo(kf.cx,kf.cy));
+    c.stroke(); c.setLineDash([]);
+    c.globalAlpha=0.55;
+    s.keyframes.forEach(kf=>{
+      c.beginPath();c.arc(kf.cx,kf.cy,3,0,Math.PI*2);
+      c.fillStyle=s.color;c.fill();
+    });
+  }
+  const r=rad*pulse;
+  c.globalAlpha=0.22;
+  c.beginPath();c.arc(pos.cx,pos.cy,r,0,Math.PI*2);
+  c.fillStyle=s.color;c.fill();
+  c.globalAlpha=0.88;
+  c.strokeStyle=s.color;c.lineWidth=2.5;c.stroke();
+  c.beginPath();c.arc(pos.cx,pos.cy,4,0,Math.PI*2);
+  c.globalAlpha=0.9;c.fillStyle=s.color;c.fill();
+  c.restore();
+}
+
 // ── SELECT ─────────────────────────────────
 function hitTest(s, px, py, r=12){
   switch(s.type){
@@ -1149,6 +1285,20 @@ function hitTest(s, px, py, r=12){
       return px>s.x-r && px<s.x+(s.text||'').length*fs*.6+r && py>s.y-fs-r && py<s.y+r;
     }
     case 'focus': return dist(px,py,s.cx,s.cy)<r*2;
+    case 'curve':{
+      for(let t=0;t<=1;t+=0.05){
+        const bx=(1-t)**2*s.x1+2*(1-t)*t*s.cpx+t**2*s.x2;
+        const by=(1-t)**2*s.y1+2*(1-t)*t*s.cpy+t**2*s.y2;
+        if(dist(px,py,bx,by)<r) return true;
+      }
+      return false;
+    }
+    case 'dashed': return nearSeg(px,py,s.x1,s.y1,s.x2,s.y2,r);
+    case 'player':{
+      const pos=interpolatePlayerPos(s,fk());
+      if(!pos) return false;
+      return dist(px,py,pos.cx,pos.cy)<(s.radius||38)+r;
+    }
     default: return false;
   }
 }
@@ -1170,6 +1320,22 @@ function getBBox(s){
     }
     case 'focus':
       return {x:s.cx-s.baseRadius,y:0,w:s.baseRadius*2,h:s.cy};
+    case 'curve':{
+      const pts=[];
+      for(let t=0;t<=1;t+=0.1) pts.push({
+        x:(1-t)**2*s.x1+2*(1-t)*t*s.cpx+t**2*s.x2,
+        y:(1-t)**2*s.y1+2*(1-t)*t*s.cpy+t**2*s.y2
+      });
+      const xs=pts.map(p=>p.x),ys=pts.map(p=>p.y);
+      const x=Math.min(...xs),y=Math.min(...ys);
+      return {x,y,w:Math.max(...xs)-x,h:Math.max(...ys)-y};
+    }
+    case 'dashed': return {x:Math.min(s.x1,s.x2),y:Math.min(s.y1,s.y2),w:Math.abs(s.x2-s.x1),h:Math.abs(s.y2-s.y1)};
+    case 'player':{
+      const pos=interpolatePlayerPos(s,fk())||{cx:0,cy:0};
+      const rad=s.radius||38;
+      return {x:pos.cx-rad,y:pos.cy-rad,w:rad*2,h:rad*2};
+    }
     default: return {x:0,y:0,w:0,h:0};
   }
 }
@@ -1181,6 +1347,9 @@ function moveShape(s, dx, dy){
     case 'pen': s.path=s.path.map(p=>({x:p.x+dx,y:p.y+dy})); break;
     case 'text': s.x+=dx; s.y+=dy; break;
     case 'focus': s.cx+=dx; s.cy+=dy; break;
+    case 'curve': s.x1+=dx;s.y1+=dy;s.x2+=dx;s.y2+=dy;s.cpx+=dx;s.cpy+=dy; break;
+    case 'dashed': s.x1+=dx;s.y1+=dy;s.x2+=dx;s.y2+=dy; break;
+    case 'player': s.keyframes.forEach(kf=>{kf.cx+=dx;kf.cy+=dy}); break;
   }
 }
 
@@ -1193,6 +1362,10 @@ function getNodes(s){
         {x:s.x1,y:s.y1,id:'tl'},{x:s.x2,y:s.y1,id:'tr'},
         {x:s.x2,y:s.y2,id:'br'},{x:s.x1,y:s.y2,id:'bl'},
       ];
+    case 'curve':
+      return [{x:s.x1,y:s.y1,id:'p1'},{x:s.cpx,y:s.cpy,id:'cp'},{x:s.x2,y:s.y2,id:'p2'}];
+    case 'dashed': return [{x:s.x1,y:s.y1,id:'p1'},{x:s.x2,y:s.y2,id:'p2'}];
+    case 'player':{ const pos=interpolatePlayerPos(s,fk())||{cx:0,cy:0}; return [{x:pos.cx,y:pos.cy,id:'center'}]; }
     default: return [];
   }
 }
@@ -1208,10 +1381,30 @@ function applyNode(s, id, nx, ny){
       else if(id==='br'){s.x2=nx;s.y2=ny;}
       else if(id==='bl'){s.x1=nx;s.y2=ny;}
       break;
+    case 'curve':
+      if(id==='p1'){s.x1=nx;s.y1=ny;}
+      else if(id==='p2'){s.x2=nx;s.y2=ny;}
+      else if(id==='cp'){s.cpx=nx;s.cpy=ny;}
+      break;
+    case 'dashed':
+      if(id==='p1'){s.x1=nx;s.y1=ny;} else {s.x2=nx;s.y2=ny;}
+      break;
+    case 'player':
+      if(id==='center') addPlayerKeyframe(s,fk(),nx,ny);
+      break;
   }
 }
 
 function drawSelectionHandles(c, s){
+  if(s.type==='player'){
+    const pos=interpolatePlayerPos(s,fk());
+    if(!pos) return;
+    c.save();
+    c.strokeStyle='rgba(255,255,255,0.75)';c.lineWidth=1.5;c.setLineDash([3,3]);
+    c.beginPath();c.arc(pos.cx,pos.cy,(s.radius||38)+10,0,Math.PI*2);c.stroke();
+    c.setLineDash([]);c.restore();
+    return;
+  }
   const bb = getBBox(s);
   const nodes = getNodes(s);
   c.save();
@@ -1219,11 +1412,25 @@ function drawSelectionHandles(c, s){
   c.strokeStyle='rgba(255,255,255,0.55)'; c.lineWidth=1; c.setLineDash([4,3]);
   c.strokeRect(bb.x-5, bb.y-5, bb.w+10, bb.h+10);
   c.setLineDash([]);
+  // Control point line for curve
+  if(s.type==='curve'){
+    c.save();
+    c.strokeStyle='rgba(66,165,245,0.4)';c.lineWidth=1;c.setLineDash([3,3]);
+    c.beginPath();c.moveTo(s.x1,s.y1);c.lineTo(s.cpx,s.cpy);c.lineTo(s.x2,s.y2);
+    c.stroke();c.setLineDash([]);c.restore();
+  }
   // Draggable nodes
   nodes.forEach(n=>{
-    c.beginPath(); c.arc(n.x, n.y, 7, 0, Math.PI*2);
-    c.fillStyle='rgba(255,255,255,0.95)'; c.fill();
-    c.strokeStyle='rgba(0,0,0,0.65)'; c.lineWidth=1.5; c.stroke();
+    if(n.id==='cp'){
+      c.save();c.translate(n.x,n.y);c.rotate(Math.PI/4);
+      c.fillStyle='#42a5f5';c.fillRect(-6,-6,12,12);
+      c.strokeStyle='rgba(0,0,0,0.7)';c.lineWidth=1.5;c.strokeRect(-6,-6,12,12);
+      c.restore();
+    } else {
+      c.beginPath();c.arc(n.x,n.y,7,0,Math.PI*2);
+      c.fillStyle='rgba(255,255,255,0.95)';c.fill();
+      c.strokeStyle='rgba(0,0,0,0.65)';c.lineWidth=1.5;c.stroke();
+    }
   });
   // Text resize handle
   if(s.type==='text'){
@@ -1259,7 +1466,28 @@ function nearSeg(px,py,x1,y1,x2,y2,r){
 }
 
 // ── CLEAR ──────────────────────────────────
-function clearCanvas(){ S.annotations={}; renderFrame(); toast('Canvas limpiado'); }
+function clearCanvas(){ S.annotations={}; renderFrame(); toast('Canvas limpiado'); pushHistory(); }
+
+// ── HISTORY ────────────────────────────────
+const MAX_HIST = 50;
+function pushHistory(){
+  S.history.splice(S.historyIdx + 1);
+  S.history.push(JSON.parse(JSON.stringify(S.annotations)));
+  if(S.history.length > MAX_HIST){ S.history.shift(); }
+  S.historyIdx = S.history.length - 1;
+}
+function undo(){
+  if(S.historyIdx <= 0){ toast('Nada que deshacer'); return; }
+  S.historyIdx--;
+  S.annotations = JSON.parse(JSON.stringify(S.history[S.historyIdx]));
+  S.sel = null; S.inProgress = null; renderFrame();
+}
+function redo(){
+  if(S.historyIdx >= S.history.length - 1){ toast('Nada que rehacer'); return; }
+  S.historyIdx++;
+  S.annotations = JSON.parse(JSON.stringify(S.history[S.historyIdx]));
+  S.sel = null; S.inProgress = null; renderFrame();
+}
 
 // ── TOOLS ──────────────────────────────────
 function setTool(t){
@@ -1269,7 +1497,8 @@ function setTool(t){
   document.querySelectorAll('.tool-btn').forEach(b=>b.classList.toggle('active',b.dataset.tool===t));
   canvas.style.cursor = t==='eraser'?'cell':t==='select'?'default':'crosshair';
   const names={arrow:'Flecha',line:'Línea',pen:'Trazo',circle:'Zona',rect:'Rectángulo',
-    text:'Texto',eraser:'Borrador',zoom:'Zoom',focus:'Foco',select:'Seleccionar'};
+    text:'Texto',eraser:'Borrador',zoom:'Zoom',focus:'Foco',select:'Seleccionar',
+    curve:'Flecha curva',dashed:'Trayectoria',player:'Jugador'};
   document.getElementById('sb-tool').textContent = names[t]||t;
   renderFrame();
 }
@@ -1477,14 +1706,17 @@ function startExport(){
       // draw shapes visible at this frame
       const k=Math.round(video.currentTime*10);
       const expFocus=[];
+      const expPlayer=[];
       for(const key in S.annotations){
         for(const s of S.annotations[key]){
           if(k>=s.fromKey&&k<=s.toKey){
             if(s.type==='focus'){ expFocus.push(s); }
+            else if(s.type==='player'){ expPlayer.push(s); }
             else { cctx.save(); applyStyle(cctx,s); drawShape(cctx,s); cctx.restore(); }
           }
         }
       }
+      expPlayer.forEach(s=>drawPlayer(cctx,s,k));
       if(expFocus.length) drawFocusShapes(cctx, expFocus, cw, ch);
       video.currentTime+=1/FPS;
       expTimer=setTimeout(frame,8);
@@ -1642,6 +1874,10 @@ function fmt(s){
 document.addEventListener('keydown',e=>{
   if(['INPUT','TEXTAREA'].includes(e.target.tagName)) return;
   if(e.key==='Escape'){ if(zoomModal.classList.contains('show')) closeZoom(); return; }
+  if(e.ctrlKey || e.metaKey){
+    if(e.key==='z' && !e.shiftKey){ e.preventDefault(); undo(); return; }
+    if((e.key==='z' && e.shiftKey) || e.key==='y'){ e.preventDefault(); redo(); return; }
+  }
   const map={
     ' ':()=>togglePlay(),
     'ArrowLeft':()=>skipTime(-5), 'ArrowRight':()=>skipTime(5),
@@ -1652,6 +1888,8 @@ document.addEventListener('keydown',e=>{
     'r':()=>setTool('rect'),      't':()=>setTool('text'),
     'e':()=>setTool('eraser'),    'z':()=>setTool('zoom'),
     'k':()=>setTool('focus'),     's':()=>setTool('select'),
+    'v':()=>setTool('curve'),     'j':()=>setTool('dashed'),
+    'g':()=>setTool('player'),
   };
   if(map[e.key]){ e.preventDefault(); map[e.key](); }
 });
@@ -1690,6 +1928,9 @@ if('serviceWorker' in navigator){
     navigator.serviceWorker.register('./sw.js').catch(()=>{});
   });
 }
+
+// Initial history snapshot
+pushHistory();
 </script>
 </body>
 </html>
